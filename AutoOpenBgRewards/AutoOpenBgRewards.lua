@@ -23,7 +23,7 @@ f:RegisterEvent("MERCHANT_CLOSED")
 f:SetScript("OnEvent", function(self, event, ...) self[event](self, ...) end)
 local _,scanLaunched,bagsAreFull,InstanceType,curZone
 local lockedBagSlot,openTryCount,cfg,gcfg,trashItemsCount,containerItemsCount={},{},{},{},{},{}
-local lastBagUpdTime=0
+local lastBagUpdTime,currentBag,currentSlot=0,0,1
 local oldAutoLootState=GetCVar("autoLootDefault")
 
 local ZONE_ULDUAR = LOCALE=="ruRU" and "Ульдуар" or "Ulduar"
@@ -33,8 +33,10 @@ local AUCTION_ITEM_SUB_CATEGORY_MOUNT = LOCALE=="ruRU" and "Верховые ж�
 local BUG_CATEGORY13,ITEM_SOULBOUND,ITEM_SPELL_KNOWN = BUG_CATEGORY13,ITEM_SOULBOUND,ITEM_SPELL_KNOWN
 local ITEM_TOOLTIP_SPELL_TEXT_LEARN_COMPANION = LOCALE=="ruRU" and "Использование: Учит призывать этого спутника." or "Use: Teaches you how to summon this companion."
 local ITEM_TOOLTIP_SPELL_TEXT_LEARN_COMPANION2 = LOCALE=="ruRU" and "Использование: Учит призывать и отпускать этого спутника." or "Use: Teaches you how to summon and dismiss this companion."
+local ITEM_TOOLTIP_SPELL_TEXT_LEARN_COMPANION3 = LOCALE=="ruRU" and "Обучает умению вызывать и отпускать этого спутника." or "Use: Teaches you how to summon and dismiss this companion."
 local ITEM_TOOLTIP_SPELL_TEXT_LEARN_MOUNT = LOCALE=="ruRU" and "Использование: Обучает управлению этим верховым животным. Это очень быстрое верховое животное." or "Use: Teaches you how to summon this mount.  This is a very fast mount."
 local ITEM_TOOLTIP_TEXT_MOUNT = LOCALE=="ruRU" and "Верховые животные" or "Mount"
+local ERR_INV_FULL = ERR_INV_FULL
 
 local GetContainerNumFreeSlots,GetItemInfo,GetItemCount = GetContainerNumFreeSlots,GetItemInfo,GetItemCount
 local GetContainerItemInfo,GetContainerNumSlots,GetContainerItemID = GetContainerItemInfo,GetContainerNumSlots,GetContainerItemID
@@ -50,8 +52,11 @@ local format = string.format
 local floor = math.floor
 local tinsert = table.insert 
 local tremove = table.remove
+local pairs, ipairs = pairs, ipairs
 local _G = _G
-local InCombatLockdown = InCombatLockdown
+local UnitAffectingCombat = UnitAffectingCombat
+local GetMoney = GetMoney
+local GetCursorInfo = GetCursorInfo
 
 -- стремные функции, которые будут использоваться в коде. надеюсь все проверки правильно сделаю... 
 local ClearCursor,PickupContainerItem,DeleteCursorItem,UseContainerItem=ClearCursor,PickupContainerItem,DeleteCursorItem,UseContainerItem
@@ -59,12 +64,12 @@ local ClearCursor,PickupContainerItem,DeleteCursorItem,UseContainerItem=ClearCur
 -- айди итемов-контейнеров которые будем опенить в авто-моде
 local containerIDs =
 {
-  38165, -- ларец
+  --38165, -- ларец
   38702, -- красный
-  10594, -- сундук наград с поля боя
-  44816, -- скари лутбокс
-  8507,  -- Festive
-  44951, -- ящик бомб (на тест)
+  --10594, -- сундук наград с поля боя
+  --44816, -- скари лутбокс
+  --8507,  -- Festive
+  --44951, -- ящик бомб (на тест)
 }
 
 -- функция отложенного вызова другой функции
@@ -74,15 +79,16 @@ do
   local calls = {}  -- Таблица для хранения отложенных вызовов
   
   local function OnUpdate(self, elapsed)
-    for i, call in ipairs(calls) do
+    for i = #calls, 1, -1 do
+      local call = calls[i]
       call.time = call.time + elapsed
       if call.time >= call.delay then
         call.func()
-        tremove(calls, i)  -- Удаляем вызов из списка
+        tremove(calls, i)
       end
     end
   end
-  
+
   f:SetScript("OnUpdate", OnUpdate)
   
   -- Основная функция для отложенных вызовов
@@ -148,10 +154,8 @@ DEFAULT_CHAT_FRAME:HookScript("OnHyperlinkClick", function(self, link, str, butt
     if arg2 == "Settings" then
       InterfaceOptionsFrame_OpenToCategory(f.settingsScrollFrame)
     elseif arg2 == "Confirm_Delete" then
-      --f:ScanBags(""..ADDON_NAME.."_Confirm_Delete",true)
       f:ScanBags("OnHyperlinkClick", not cfg["auto_del_trash_confirm"], cfg["auto_open_when_received"] and not cfg["auto_open_confirm"])
     elseif arg2 == "Confirm_Open" then
-      --f:ScanBags(""..ADDON_NAME.."_Confirm_Open",nil,true)
       f:ScanBags("OnHyperlinkClick", not cfg["auto_del_trash_confirm"], cfg["auto_open_when_received"] and not cfg["auto_open_confirm"])
     end
   end
@@ -167,6 +171,7 @@ end
 
 function f:PLAYER_LEAVING_WORLD()
   --print("PLAYER_LEAVING_WORLD")
+  scanLaunched=nil
   if f:IsEventRegistered("BAG_UPDATE") then
     f:UnregisterEvent("BAG_UPDATE")
   end
@@ -180,8 +185,9 @@ end
 function f:BAG_UPDATE()
   if not cfg["enable_addon"] then return end
   --print("BAG_UPDATE")
-  if lastBagUpdTime>=(GetTime()-0.1) then return end
-  lastBagUpdTime=GetTime()
+  local t = GetTime()
+  if lastBagUpdTime>=(t-0.1) then return end
+  lastBagUpdTime=t
   --print("BAG_UPDATE (+)")
   f:ScanBags("BAG_UPDATE", not cfg["auto_del_trash_confirm"], cfg["auto_open_when_received"] and not cfg["auto_open_confirm"])
 end
@@ -204,7 +210,7 @@ end
 function f:PLAYER_ENTERING_WORLD(byCheckbox)
   InstanceType = select(2,IsInInstance())
   curZone=GetRealZoneText()
-  lockedBagSlot,bagsAreFull,openTryCount={},nil,{}
+  lockedBagSlot,bagsAreFull,openTryCount,currentBag,currentSlot={},nil,{},0,1
   oldAutoLootState=GetCVar("autoLootDefault")
   
   if not cfg["enable_addon"] then return end
@@ -219,16 +225,11 @@ function f:PLAYER_ENTERING_WORLD(byCheckbox)
       _print("RegisterEvent BAG_UPDATE")
     end
     f:ScanBags("PLAYER_ENTERING_WORLD", nil, cfg["auto_open_when_received"] and not cfg["auto_open_confirm"]) -- скан при входе в игру
-    --f:ScanBags("PLAYER_ENTERING_WORLD", not cfg["auto_del_trash_confirm"]) -- скан при входе в игру
-    --f:ScanBags(reason, ForceDelTrash, ForceOpen)
-    --f:ScanBags(""..ADDON_NAME.."_Confirm_Delete",true)
-    --f:ScanBags(""..ADDON_NAME.."_Confirm_Open",nil,true)
   end)
 end
 
 function f:MERCHANT_CLOSED()
   f:ScanBags("MERCHANT_CLOSED", nil, cfg["auto_open_when_received"] and not cfg["auto_open_confirm"]) 
-  --f:ScanBags("PLAYER_ENTERING_WORLD", not cfg["auto_del_trash_confirm"]) 
 end
 
 function f:ZONE_CHANGED_NEW_AREA()
@@ -334,13 +335,15 @@ local function GetItemTooltipInfo(bag,slot)
     return nil,nil,nil,nil 
   end
   
-  f.Tip:ClearLines()
-  f.Tip:SetBagItem(bag,slot)
+  local tip = f.Tip
+  
+  tip:ClearLines()
+  tip:SetBagItem(bag,slot)
   
   local isSoulbound,isAlreadyKnown,isMount,isCompanion
   
-  for i = 1, f.Tip:NumLines() do
-    local text = _G[f.Tip:GetName().."TextLeft"..i]:GetText()
+  for i = 1, tip:NumLines() do
+    local text = _G[tip:GetName().."TextLeft"..i]:GetText()
     
     local link = GetContainerItemLink(bag,slot)
     local id = GetContainerItemID(bag,slot)
@@ -351,7 +354,7 @@ local function GetItemTooltipInfo(bag,slot)
     elseif (text == ITEM_SPELL_KNOWN) then
       isAlreadyKnown=true
       _print("изученная шмотка детектед:",bag,slot,link,id)
-    elseif (text == ITEM_TOOLTIP_SPELL_TEXT_LEARN_COMPANION or text == ITEM_TOOLTIP_SPELL_TEXT_LEARN_COMPANION2) then
+    elseif (text == ITEM_TOOLTIP_SPELL_TEXT_LEARN_COMPANION or text == ITEM_TOOLTIP_SPELL_TEXT_LEARN_COMPANION2 or text == ITEM_TOOLTIP_SPELL_TEXT_LEARN_COMPANION3) then
       isCompanion=true
       _print("пет детектед:",bag,slot,link,id)
     elseif (text == ITEM_TOOLTIP_TEXT_MOUNT or text == ITEM_TOOLTIP_SPELL_TEXT_LEARN_MOUNT) then
@@ -363,26 +366,52 @@ local function GetItemTooltipInfo(bag,slot)
   return isSoulbound,isAlreadyKnown,isMount,isCompanion
 end
 
+-- Создаем таблицу для САМИХ объектов фреймов (не имен)
+local framesToScan = {}
+
+-- Эта функция заполнит таблицу реальными ссылками на фреймы
+local function LocalizeFrames()
+  local list = {
+    "LootFrame", "MerchantFrame", "BankFrame", "TradeFrame", 
+    "SendMailFrame", "AuctionFrame", "GuildBankFrame"
+  }
+  for _, name in ipairs(list) do
+    local f = _G[name]
+    if f then
+      table.insert(framesToScan, f)
+    end
+  end
+end
+
+local function SomeItemFrameIsOpen()
+  for i = 1, #framesToScan do
+    if framesToScan[i]:IsVisible() then
+      return framesToScan[i]
+    end
+  end
+  return false
+end
+
 local function CannotScan()
   if
-    not cfg["enable_addon"]
-    or scanLaunched
-    or InCombatLockdown()
+    scanLaunched
+    or not cfg["enable_addon"]
+    or UnitAffectingCombat("player")
     or not UnitIsConnected("player")
+    or SomeItemFrameIsOpen() -- 19.02.26
     --or bagsAreFull  
-    or curZone==nil
-    or curZone==""
-    or InstanceType=="pvp" 
-    or InstanceType=="arena"
-    --or inCrossZone()
+    -- or curZone==nil
+    -- or curZone==""
+    --or InstanceType=="pvp" 
+    --or InstanceType=="arena"
+    or inCrossZone()
     or UnitExists("npc")
-    or MerchantFrame:IsVisible()  
-    or LootFrame:IsVisible()
-    or BankFrame:IsVisible()
-    --or MailFrame:IsVisible()
-    or TradeFrame:IsVisible()
-    or (AuctionFrame and AuctionFrame:IsVisible())
-    or (GuildBankFrame and GuildBankFrame:IsVisible())
+    -- or MerchantFrame:IsVisible()  
+    -- or LootFrame:IsVisible()
+    -- or BankFrame:IsVisible()
+    -- or TradeFrame:IsVisible()
+    -- or (AuctionFrame and AuctionFrame:IsVisible())
+    -- or (GuildBankFrame and GuildBankFrame:IsVisible())
     --or (cfg["stop_if_less_then_X_free_bag_slots"] and getNumFreeBagSlots() < MIN_FREE_SLOTS_FOR_AUTO_OPEN)  
     --or (cfg["stop_if_more_then_X_money"] and GetMoney() > MAX_MONEY_FOR_AUTO_OPEN) 
   then
@@ -397,13 +426,13 @@ local function CanOpen()
     not cfg["enable_addon"]
     or UnitExists("npc") 
     or UnitIsDead("player") 
-    or MerchantFrame:IsVisible() 
-    or SendMailFrame:IsVisible()
-    --or MailFrame:IsVisible()
-    or TradeFrame:IsVisible()
-    or BankFrame:IsVisible() 
-    or (AuctionFrame and AuctionFrame:IsVisible())
-    or (GuildBankFrame and GuildBankFrame:IsVisible())
+    or SomeItemFrameIsOpen()
+    -- or MerchantFrame:IsVisible() 
+    -- or SendMailFrame:IsVisible()
+    -- or TradeFrame:IsVisible()
+    -- or BankFrame:IsVisible() 
+    -- or (AuctionFrame and AuctionFrame:IsVisible())
+    -- or (GuildBankFrame and GuildBankFrame:IsVisible())
     or inCrossZone()
     --or InstanceType=="pvp" 
     --or InstanceType=="arena" 
@@ -418,7 +447,7 @@ local function CanOpen()
 end
 
 local function CanDelete()
-  if not cfg["enable_addon"] or GetCursorInfo()~=nil then
+  if not cfg["enable_addon"] or GetCursorInfo()~=nil or inCrossZone() then
     return false
   end
   for k,v in pairs(cfg) do
@@ -445,12 +474,12 @@ function f:ScanBags(reason, ForceDelTrash, ForceOpen)
   
   --local scanForTrash=not ForceDelTrash
   --local scanForOpen=not ForceOpen
-  
+
   f:SetScript("OnUpdate",function(_,elapsed)
     if not scanLaunched then
       _print("|cffff0000скан итемов отмененен по одной из причин: открытие окна вендора/отправки почты/трейда/гб/банка/аука/взаимодействие с нпц/смерть перса/нахождение на кросе/фул сумки/итем заблокирован/не открывается/автолут забагался/лимит голды на открытие в опциях/не открывать если меньше "..MIN_FREE_SLOTS_FOR_AUTO_OPEN.." слотов в сумках в опциях|r")
       bagsAreFull=nil
-      lockedBagSlot,openTryCount,trashItemsCount,containerItemsCount={},{},{},{}
+      lockedBagSlot,openTryCount,trashItemsCount,containerItemsCount,currentBag,currentSlot={},{},{},{},0,1
       
       if GetCVar("autoLootDefault")~=oldAutoLootState then
         SetCVar("autoLootDefault",oldAutoLootState)
@@ -467,11 +496,25 @@ function f:ScanBags(reason, ForceDelTrash, ForceOpen)
       return 
     end
     --if t<0.01 or LootFrame:IsVisible() then return end
+    local workDone = false -- Флаг, сделали ли мы что-то в этом кадре
+    
+    local cfg = cfg or {}
 
     -- скан по очистке мусора. если не выбран режим форс автооткрытия 
     if not ForceOpen and CanDelete() then
-      for bag = 0,4 do
-        for slot = 1,GetContainerNumSlots(bag) do
+      for bag = currentBag,4 do
+        local numSlots = GetContainerNumSlots(bag)
+      
+        -- Если мы в той же сумке, где остановились, начинаем с currentSlot.
+        -- Если перешли в новую сумку, начинаем с 1.
+        local startSlot = (bag == currentBag) and currentSlot or 1
+      
+        for slot = startSlot,numSlots do
+        
+          -- Запоминаем текущую позицию "курсора"
+          currentBag = bag
+          currentSlot = slot
+        
           local itemID = GetContainerItemID(bag,slot)
 
           if itemID then 
@@ -571,10 +614,24 @@ function f:ScanBags(reason, ForceDelTrash, ForceOpen)
       _print("|cff00ff00сумки на наличие мусора просканированы|r",reason)
     end
     
+    currentBag,currentSlot=0,1
+    
     -- скан по автооткрытию. если не выбран режим форс удаления и включена опция по автооткрытию
     if not ForceDelTrash and cfg["auto_open_when_received"] then
-      for bag = 0,4 do
-        for slot = 1,GetContainerNumSlots(bag) do
+    --print("jghjghjghjhg")
+      for bag = currentBag,4 do
+        local numSlots = GetContainerNumSlots(bag)
+      
+        -- Если мы в той же сумке, где остановились, начинаем с currentSlot.
+        -- Если перешли в новую сумку, начинаем с 1.
+        local startSlot = (bag == currentBag) and currentSlot or 1
+      
+        for slot = startSlot,numSlots do
+        
+          -- Запоминаем текущую позицию "курсора"
+          currentBag = bag
+          currentSlot = slot
+        
           local itemID = GetContainerItemID(bag,slot)
 
           if itemID then 
@@ -610,42 +667,49 @@ function f:ScanBags(reason, ForceDelTrash, ForceOpen)
                       scanLaunched=nil
                       return 
                     end
+                    
+                    local SomeFrame = SomeItemFrameIsOpen() -- 19.2.26
+                    if SomeFrame then
+                      _print("|cffff0000опен итемов прерван изза открытия окна|r", SomeFrame:GetName())
+                      scanLaunched=nil
+                      return 
+                    end
                   
-                    if MerchantFrame:IsVisible() then
-                      _print("|cffff0000опен итемов прерван изза открытия окна вендора|r")
-                      scanLaunched=nil
-                      return 
-                    end
+                    -- if MerchantFrame:IsVisible() then
+                      -- _print("|cffff0000опен итемов прерван изза открытия окна вендора|r")
+                      -- scanLaunched=nil
+                      -- return 
+                    -- end
                     
-                    if --[[MailFrame:IsVisible()]] SendMailFrame:IsVisible() then
-                      _print("|cffff0000опен итемов прерван изза открытия окна отправки почты|r")
-                      scanLaunched=nil
-                      return 
-                    end
+                    -- if SendMailFrame:IsVisible() then
+                      -- _print("|cffff0000опен итемов прерван изза открытия окна отправки почты|r")
+                      -- scanLaunched=nil
+                      -- return 
+                    -- end
                     
-                    if TradeFrame:IsVisible() then
-                      _print("|cffff0000опен итемов прерван изза открытия окна трейда|r")
-                      scanLaunched=nil
-                      return 
-                    end
+                    -- if TradeFrame:IsVisible() then
+                      -- _print("|cffff0000опен итемов прерван изза открытия окна трейда|r")
+                      -- scanLaunched=nil
+                      -- return 
+                    -- end
 
-                    if BankFrame:IsVisible() then
-                      _print("|cffff0000опен итемов прерван изза открытия окна банка перса|r")
-                      scanLaunched=nil
-                      return 
-                    end
+                    -- if BankFrame:IsVisible() then
+                      -- _print("|cffff0000опен итемов прерван изза открытия окна банка перса|r")
+                      -- scanLaunched=nil
+                      -- return 
+                    -- end
                     
-                    if AuctionFrame and AuctionFrame:IsVisible() then
-                      _print("|cffff0000опен итемов прерван изза открытия окна аука|r")
-                      scanLaunched=nil
-                      return 
-                    end
+                    -- if AuctionFrame and AuctionFrame:IsVisible() then
+                      -- _print("|cffff0000опен итемов прерван изза открытия окна аука|r")
+                      -- scanLaunched=nil
+                      -- return 
+                    -- end
                     
-                    if GuildBankFrame and GuildBankFrame:IsVisible() then
-                      _print("|cffff0000опен итемов прерван изза открытия окна гб|r")
-                      scanLaunched=nil
-                      return 
-                    end
+                    -- if GuildBankFrame and GuildBankFrame:IsVisible() then
+                      -- _print("|cffff0000опен итемов прерван изза открытия окна гб|r")
+                      -- scanLaunched=nil
+                      -- return 
+                    -- end
                     
                     if inCrossZone() then 
                       _print("|cffff0000опен итемов прерван изза нахождения на кросе|r")
@@ -751,22 +815,15 @@ function f:ScanBags(reason, ForceDelTrash, ForceOpen)
     end
 
     _print("|cff00ffffскан итемов завершен успешно|r",reason)
-    scanLaunched=nil
-    bagsAreFull=nil
-    lockedBagSlot,openTryCount,trashItemsCount,containerItemsCount={},{},{},{}
+    scanLaunched,bagsAreFull=nil,nil
+    lockedBagSlot,openTryCount,trashItemsCount,containerItemsCount,currentBag,currentSlot={},{},{},{},0,1
     
     if GetCVar("autoLootDefault")~=oldAutoLootState then
       SetCVar("autoLootDefault",oldAutoLootState)
     end
     
     f:SetScript("OnUpdate",nil)
-    
-    -- if ForceDelTrash then
-      -- f:ScanBags("PLAYER_ENTERING_WORLD", cfg["auto_del_trash_confirm"]==false, cfg["auto_open_confirm"]==false)
-    -- elseif ForceOpen then
-      -- f:ScanBags("PLAYER_ENTERING_WORLD", cfg["auto_del_trash_confirm"]==false, cfg["auto_open_confirm"]==false)
-    -- end
-    
+
     if ForceOpen then
       f:ScanBags("check trash after ForceOpen", not cfg["auto_del_trash_confirm"]) 
     end
@@ -1038,8 +1095,10 @@ end
 
 settingsFrame:RegisterEvent("ADDON_LOADED")
 settingsFrame:SetScript("onevent", function(_, event, ...) 
-  if arg1~=ADDON_NAME then return end
-  settingsFrame:InitConfig()
+  LocalizeFrames()
+  if arg1 == ADDON_NAME then 
+    settingsFrame:InitConfig()
+  end
 end)
 
 -- диалоговые окна по центру с запросом на подтверждение авто открытия/удаления 
